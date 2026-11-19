@@ -1,0 +1,3 @@
+# Printed QR codes use short links (/q/Q-12). Serve the app for them; src/router.ts turns
+# the path into #/scan/Q-12?src=qr. Netlify and Cloudflare Pages read this file.
+/q/*  /index.html  200

@@ -1,197 +1,341 @@
-import { useState } from 'react';
-import { ArrowRight, FileText } from 'lucide-react';
-import IssueMap from '../components/IssueMap';
-import { SampleBadge, StatusTag } from '../components/ui';
-import { CATEGORIES, CATEGORY_ORDER, STATUSES, STATUS_ORDER, DISTRICT } from '../data/meta';
-import { daysBetween } from '../lib/format';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { ArrowRight, Check, ChevronRight, Copy, QrCode } from 'lucide-react';
+import { CATEGORY_ICONS, SampleBadge, labelClass, linkClass } from '../components/ui';
+import { config } from '../config';
+import { CATEGORIES } from '../data/meta';
+import type { AnalyticsEvent, AttentionRules, Category } from '../data/types';
+import { EXPERIMENT_THRESHOLDS } from '../lib/experimentSettings';
+import { addDays, formatHours, plural, shortDate, today } from '../lib/format';
+import { checkThreshold } from '../lib/metrics';
+import { displayLink } from '../lib/qr';
 import { navigate } from '../router';
 import { useStore } from '../store';
-import { ATTENTION_RULE, ActionButton, attentionFor, attentionReason } from './actions';
+import { TodoAction } from './actions';
+import { TODO_GROUPS, cityFigures, firstResponse, intakeFigures, todoList, waited, type TodoItem } from './dashboard';
+import { Photos } from './Photos';
+import { UpdateComposer } from './UpdateComposer';
 
+const card = 'rounded-xl border border-slate-200 bg-white';
+const button = 'flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium hover:border-slate-300';
+
+/**
+ * The staff home page for a community district office. The to-do list is the page: who is waiting
+ * on the office today, answerable without leaving the list. Three figures for how it's going sit
+ * beside it on a wide screen and under it otherwise. Nothing here says a thing twice: the district's
+ * name is in the sidebar, the rule behind each group is in Settings, monthly figures are in Reports.
+ */
 export default function Overview() {
-  const { issues, toast } = useStore();
-  const [range, setRange] = useState('7 days');
+  const { issues, hiddenIssues, district, listEvents } = useStore();
+  const now = today();
+  const [events, setEvents] = useState<AnalyticsEvent[] | null>(null);
 
-  const open = issues.filter((i) => i.status !== 'fixed');
-  const thisWeek = issues.filter((i) => daysBetween(i.createdAt) <= 7);
-  const votesThisWeek = issues.reduce((a, i) => a + i.votesThisWeek, 0);
-  const fixed = issues.filter((i) => i.status === 'fixed');
-  const confirmed = fixed.filter((i) => i.confirmedFixed > 0);
-  const attention = open.flatMap((i) => {
-    const kind = attentionFor(i);
-    return kind ? [{ issue: i, kind }] : [];
+  // Analytics for the response times, this 30-day window and the one before. Loaded once per visit: they move slowly.
+  useEffect(() => {
+    let current = true;
+    void listEvents(addDays(now, -61)).then((e) => current && setEvents(e));
+    return () => {
+      current = false;
+    };
+  }, [now]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const todo = useMemo(() => todoList(issues, district.rules, now), [issues, district.rules, now]);
+  const nothingPinned = issues.length === 0 && hiddenIssues.length === 0;
+
+  return (
+    <div className="mx-auto max-w-[1000px] space-y-5 px-4 py-5 md:px-8 md:py-7 xl:max-w-[1180px]">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-xl font-bold md:text-2xl">
+          To do
+          {todo.length > 0 && <span className="ml-2 text-base font-medium tabular-nums text-slate-500">{todo.length}</span>}
+        </h1>
+        <SampleBadge />
+      </header>
+
+      {nothingPinned ? (
+        <GetStarted />
+      ) : (
+        <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_280px]">
+          <section className={`${card} overflow-hidden`}>
+            {todo.length ? <TodoGroups items={todo} /> : <AllClear rules={district.rules} />}
+          </section>
+          <Figures events={events} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Figures({ events }: { events: AnalyticsEvent[] | null }) {
+  const { issues } = useStore();
+  const now = today();
+  const city = cityFigures(issues, now);
+  const intake = intakeFigures(issues, now);
+  const response = events && firstResponse(events, now);
+  const before = events && firstResponse(events, addDays(now, -30));
+  const target = EXPERIMENT_THRESHOLDS.staffResponseHours;
+
+  let responseNote = 'Loading…';
+  let responseTone = 'text-slate-500';
+  if (response && !response.pins) responseNote = 'No new issues in the last 30 days';
+  else if (response) {
+    const parts = [response.responded ? 'Last 30 days' : 'Last 30 days · none answered yet'];
+    // Against the 30 days before, in words: lower is better.
+    if (response.responded && before?.responded) {
+      const [shown, was] = [formatHours(response.medianHours), formatHours(before.medianHours)];
+      if (shown === was) parts.push('same as the 30 days before');
+      else parts.push(`${response.medianHours! < before.medianHours! ? 'down' : 'up'} from ${was}`);
+    }
+    if (target.value !== null) {
+      parts.push(`target ${target.value} h`);
+      if (checkThreshold(response.medianHours, target) === 'misses') responseTone = 'text-brand-dark';
+    }
+    responseNote = parts.join(' · ');
+  }
+
+  return (
+    <div className={`${card} grid gap-px overflow-hidden bg-slate-200 sm:grid-cols-3 xl:grid-cols-1`}>
+      <Figure
+        label="New in the last 7 days"
+        value={intake.count}
+        note={[
+          intake.count ? (intake.answered === intake.count ? 'All answered' : `${intake.answered} answered so far`) : '',
+          `${intake.before} the week before`,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+      />
+      <Figure
+        label="Waiting on the City"
+        value={city.count}
+        href={city.count ? '#/org/issues?tab=city' : undefined}
+        note={city.count ? city.byAgency.map((a) => `${a.agency} ${a.count}`).join(' · ') : 'Nothing with the City right now'}
+      />
+      <Figure
+        label="Median first response"
+        value={response ? formatHours(response.medianHours) : '…'}
+        note={responseNote}
+        tone={responseTone}
+      />
+    </div>
+  );
+}
+
+/**
+ * One figure beside the to-do list: what it is, the number, a note under it. The number is large
+ * on purpose: this card is the one place that shows how things stand at a glance. Nothing here is
+ * a link; the sidebar already leads to each of these.
+ */
+/** One figure. With `href` the whole figure is a link to the list behind it, marked by the arrow. */
+function Figure({ label, value, note, tone = 'text-slate-500', href }: { label: string; value: ReactNode; note: string; tone?: string; href?: string }) {
+  const box = 'block bg-white px-4 py-3.5 md:px-5 md:py-4';
+  const body = (
+    <>
+      <p className={`${labelClass} flex items-center justify-between gap-2`}>
+        {label}
+        {href && <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" aria-hidden />}
+      </p>
+      <p className="mt-1 text-2xl font-bold tabular-nums md:text-3xl">{value}</p>
+      <p className={`mt-1 text-xs ${tone}`}>{note}</p>
+    </>
+  );
+  return href ? (
+    <a href={href} className={`${box} -outline-offset-2 hover:bg-slate-50`}>
+      {body}
+    </a>
+  ) : (
+    <div className={box}>{body}</div>
+  );
+}
+
+function TodoGroups({ items }: { items: TodoItem[] }) {
+  // One reply box at a time. It closes itself when the answered issue leaves the list.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const groups = TODO_GROUPS.map((group) => {
+    const rows = items.filter((t) => t.kind === group.kind);
+    if (!rows.length) return null;
+    return (
+      <div key={group.kind}>
+        <div className="flex items-baseline gap-2 border-b border-slate-100 bg-slate-50 px-4 py-2 md:px-5">
+          <h2 className="text-sm font-semibold">{group.title}</h2>
+          <span className="text-sm tabular-nums text-slate-500">{rows.length}</span>
+        </div>
+        {rows.map((t) => {
+          const open = openId === t.issue.id;
+          return (
+            <div key={t.issue.id} className="border-b border-slate-100 last:border-b-0">
+              {/* The title is the link; it is stretched over the row, so the whole row opens the issue and the action stays its own button. */}
+              <div
+                className={`relative flex flex-col items-start gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4 md:px-5 ${
+                  open ? '' : 'hover:bg-slate-50'
+                }`}
+              >
+                <div className="w-full min-w-0 flex-1">
+                  <p className="sm:truncate">
+                    <span className="mr-2 font-mono text-xs text-slate-500">{t.issue.id}</span>
+                    <a
+                      href={`#/org/issues/${t.issue.id}`}
+                      className="font-semibold outline-none after:absolute after:inset-0 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-ink"
+                    >
+                      {t.issue.title}
+                    </a>
+                  </p>
+                  <p className="text-sm font-semibold sm:hidden">{t.days ? `Waiting ${waited(t.days)}` : 'Today'}</p>
+                  <p className="mt-0.5 text-sm text-slate-500 sm:truncate">
+                    {/* The category hints at whose problem it is. A City row already names the agency. */}
+                    {t.kind !== 'city' && <CategoryInLine category={t.issue.category} />}
+                    {t.note}
+                  </p>
+                </div>
+                <p className="hidden w-[72px] shrink-0 text-right text-sm font-semibold tabular-nums sm:block">{waited(t.days)}</p>
+                <TodoAction item={t} open={open} onCompose={() => setOpenId(open ? null : t.issue.id)} />
+              </div>
+              {open && <ReplyInPlace item={t} onDone={() => setOpenId(null)} />}
+            </div>
+          );
+        })}
+      </div>
+    );
   });
-  const top = [...open].sort((a, b) => b.votes - a.votes).slice(0, 6);
-  const maxCategory = Math.max(1, ...CATEGORY_ORDER.map((c) => open.filter((i) => i.category === c).length));
+  return <>{groups}</>;
+}
 
-  const kpis = [
-    { label: 'Open issues', value: open.length, note: `+${thisWeek.length} since last week`, tone: 'text-brand' },
-    { label: 'New pins this week', value: thisWeek.length, note: 'from residents and QR codes', tone: 'text-slate-500' },
-    { label: 'Votes this week', value: votesThisWeek, note: `across ${issues.filter((i) => i.votesThisWeek).length} issues`, tone: 'text-slate-500' },
-    { label: 'Median days to fix', value: '8.5', note: 'down from 11.0 in Sep', tone: 'text-emerald-700' },
+/** A category inside a line of text: the icon is inline and sits on the baseline, where the flex `CategoryTag` rides high. */
+function CategoryInLine({ category }: { category: Category }) {
+  const Icon = CATEGORY_ICONS[category];
+  return (
+    <>
+      <Icon className="mr-1 inline h-3.5 w-3.5 align-[-0.15em]" aria-hidden />
+      {CATEGORIES[category].label} ·{' '}
+    </>
+  );
+}
+
+/**
+ * Answering from the list: what the resident wrote, then the same box as on the issue page.
+ * Forwarding to 311, assigning and hiding stay on the issue page.
+ */
+function ReplyInPlace({ item, onDone }: { item: TodoItem; onDone: () => void }) {
+  const { issue, kind } = item;
+  const last = issue.updates.filter((u) => !u.hidden).at(-1);
+  const said = kind === 'residents' && last?.role === 'resident' ? last : null;
+  return (
+    <div className="space-y-3 bg-slate-50 px-4 py-4 md:px-5">
+      {said ? (
+        <div className="text-sm">
+          <p className="flex flex-wrap items-baseline gap-x-2">
+            <span className="font-semibold">{said.author}</span>
+            <span className="text-xs text-slate-500">{shortDate(said.date)}</span>
+          </p>
+          <p className="text-slate-700">{said.text}</p>
+        </div>
+      ) : (
+        kind === 'new' && (
+          <div className="text-sm">
+            {issue.description && <p className="text-slate-700">{issue.description}</p>}
+            <p className="text-slate-500">{issue.locationDetail ?? issue.locationLabel}</p>
+            {issue.photos.length > 0 && (
+              <div className="mt-2">
+                <Photos photos={issue.photos} label={issue.id} size="h-24" />
+              </div>
+            )}
+          </div>
+        )
+      )}
+      <UpdateComposer issue={issue} picker autoFocus onPosted={onDone} onCancel={onDone} />
+      <p className="text-sm text-slate-500">
+        To forward it to 311, assign it or hide it,{' '}
+        <a href={`#/org/issues/${issue.id}`} className={linkClass}>
+          open the issue
+        </a>
+        .
+      </p>
+    </div>
+  );
+}
+
+function AllClear({ rules }: { rules: AttentionRules }) {
+  return (
+    <div className="px-4 py-10 text-center md:px-5">
+      <Check className="mx-auto h-6 w-6 text-slate-400" />
+      <p className="mt-2 font-semibold">Nothing is waiting on you</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">
+        Pins residents reported, issues nobody has answered, residents waiting for a reply, City requests with no follow-up in{' '}
+        {rules.cityNoReplyDays}+ days, and issues with nothing new for residents in {rules.quietDays}+ days show up here.
+      </p>
+    </div>
+  );
+}
+
+/** Day one of a pilot: no pins yet, so the page helps get the first ones in. */
+function GetStarted() {
+  const { scanPoints, toast } = useStore();
+  const link = config.publicUrl;
+  const posters = scanPoints.length;
+  const steps: { title: string; body: string; done?: boolean; action: ReactNode }[] = [
     {
-      label: 'Confirmed by residents',
-      value: fixed.length ? `${Math.round((confirmed.length / fixed.length) * 100)}%` : '—',
-      note: `${confirmed.length} of ${fixed.length} fixes`,
-      tone: 'text-slate-500',
+      title: 'Put up QR posters',
+      body: posters
+        ? `${plural(posters, 'poster')} ready to print. Put them where people wait or walk by.`
+        : 'Make one for each spot people pass: a noticeboard, a library entrance, a shop window.',
+      done: posters > 0,
+      action: (
+        <button onClick={() => navigate('/org/qr')} className={button}>
+          <QrCode className="h-4 w-4" /> QR posters
+        </button>
+      ),
+    },
+    {
+      title: 'Share the map link',
+      body: `In your newsletter, on social media, at the next board meeting: ${displayLink(link)}`,
+      action: (
+        <button
+          onClick={() =>
+            navigator.clipboard?.writeText(link).then(
+              () => toast('Link copied'),
+              () => toast(`Copy this link: ${link}`),
+            )
+          }
+          className={button}
+        >
+          <Copy className="h-4 w-4" /> Copy link
+        </button>
+      ),
+    },
+    {
+      title: 'See what residents see',
+      body: 'The public map, as it looks on a phone.',
+      action: (
+        <button onClick={() => navigate('/')} className={button}>
+          Open the map <ArrowRight className="h-4 w-4" />
+        </button>
+      ),
     },
   ];
 
-  const card = 'rounded-xl border border-slate-200 bg-white';
-
   return (
-    <div className="mx-auto max-w-[1180px] space-y-5 px-8 py-7">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="font-mono text-[11px] tracking-wider text-slate-500">WEEK OF OCT 12, 2026</p>
-          <h1 className="text-2xl font-bold">{DISTRICT}</h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <SampleBadge />
-          <div className="flex rounded-lg bg-slate-200/70 p-0.5 text-sm">
-            {['7 days', '30 days', '90 days'].map((r) => (
-              <button
-                key={r}
-                onClick={() => setRange(r)}
-                className={`rounded-md px-2.5 py-1 ${range === r ? 'bg-white font-medium shadow-sm' : 'text-slate-600'}`}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => toast('Weekly report link copied')}
-            className="flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-dark"
-          >
-            <FileText className="h-4 w-4" /> Share weekly report
-          </button>
-        </div>
-      </header>
-
-      <div className={`${card} grid grid-cols-2 divide-slate-200 md:grid-cols-3 xl:grid-cols-5 xl:divide-x`}>
-        {kpis.map((k) => (
-          <div key={k.label} className="px-5 py-4">
-            <p className="text-xs text-slate-500">{k.label}</p>
-            <p className="mt-1 text-3xl font-bold">{k.value}</p>
-            <p className={`mt-1 text-xs ${k.tone}`}>{k.note}</p>
-          </div>
-        ))}
+    <section className={card}>
+      <div className="border-b border-slate-100 px-4 py-3.5 md:px-5">
+        <h2 className="font-semibold">Get the pilot started</h2>
+        <p className="mt-0.5 text-sm text-slate-500">
+          Nothing has been pinned yet. Residents find Problem Pins through your posters and links.
+        </p>
       </div>
-
-      <div className="grid gap-4 xl:grid-cols-[1fr_440px]">
-        <section className={card}>
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-            <h2 className="font-semibold">Needs attention</h2>
-            <span className="text-sm text-slate-500">{attention.length}</span>
-          </div>
-          {attention.map(({ issue, kind }) => (
-            <div
-              key={issue.id}
-              onClick={() => navigate(`/org/issues/${issue.id}`)}
-              className="flex cursor-pointer items-center gap-4 border-b border-slate-100 px-5 py-3.5 hover:bg-slate-50"
+      <ol>
+        {steps.map((s, n) => (
+          <li key={s.title} className="flex flex-col gap-2 border-b border-slate-100 px-4 py-3.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 md:px-5">
+            <span
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600"
             >
-              <div className="min-w-0 flex-1">
-                <p className="truncate">
-                  <span className="mr-2 font-mono text-xs text-slate-400">{issue.id}</span>
-                  <span className="font-semibold">{issue.title}</span>
-                </p>
-                <p className="mt-0.5 truncate text-sm text-slate-500">{attentionReason(issue)}</p>
-              </div>
-              <ActionButton issue={issue} kind={kind} />
+              {s.done ? <Check className="h-3.5 w-3.5" /> : n + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold">{s.title}</p>
+              <p className="text-sm text-slate-500">{s.body}</p>
             </div>
-          ))}
-          {!attention.length && <p className="px-5 py-8 text-center text-sm text-slate-500">Nothing needs attention. Nice.</p>}
-          <p className="px-5 py-3 text-xs text-slate-400">{ATTENTION_RULE}</p>
-        </section>
-
-        <section className={card}>
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-            <h2 className="font-semibold">Where open issues are</h2>
-            <span className="font-mono text-xs text-slate-500">{open.length} pins</span>
-          </div>
-          <div className="h-[230px] p-3">
-            <div className="h-full overflow-hidden rounded-lg">
-              <IssueMap issues={open} zoom={15} onSelect={(i) => navigate(`/org/issues/${i.id}`)} />
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className={`${card} p-5`}>
-          <h2 className="mb-3 font-semibold">Open issues by category</h2>
-          {CATEGORY_ORDER.map((c) => {
-            const n = open.filter((i) => i.category === c).length;
-            return (
-              <div key={c} className="mb-2 flex items-center gap-3 text-sm">
-                <span className="w-28">{CATEGORIES[c].label}</span>
-                <div className="h-3 flex-1 rounded bg-slate-100">
-                  <div className="h-3 rounded" style={{ width: `${(n / maxCategory) * 100}%`, background: CATEGORIES[c].color }} />
-                </div>
-                <span className="w-6 text-right font-mono text-xs">{n}</span>
-              </div>
-            );
-          })}
-        </section>
-        <section className={`${card} p-5`}>
-          <h2 className="mb-3 font-semibold">All issues by status</h2>
-          <div className="mb-4 flex h-3 overflow-hidden rounded">
-            {STATUS_ORDER.map((s) => (
-              <div key={s} style={{ flex: issues.filter((i) => i.status === s).length, background: STATUSES[s].color }} />
-            ))}
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            {STATUS_ORDER.map((s) => (
-              <div key={s} className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
-                <StatusTag status={s} />
-                <span className="font-mono text-xs">{issues.filter((i) => i.status === s).length}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      <section className={`${card} overflow-x-auto`}>
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-          <h2 className="font-semibold">Open issues by votes</h2>
-          <button onClick={() => navigate('/org/issues')} className="flex items-center gap-1 text-sm font-semibold text-brand">
-            View all {open.length} <ArrowRight className="h-4 w-4" />
-          </button>
-        </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left font-mono text-[10px] tracking-wider text-slate-500">
-              {['ID', 'ISSUE', 'LOCATION', 'VOTES', 'OPEN', 'OWNER', 'STATUS'].map((h) => (
-                <th key={h} className="px-5 py-2 font-normal">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {top.map((i) => (
-              <tr
-                key={i.id}
-                onClick={() => navigate(`/org/issues/${i.id}`)}
-                className="cursor-pointer border-t border-slate-100 hover:bg-slate-50"
-              >
-                <td className="px-5 py-2.5 font-mono text-xs text-slate-500">{i.id}</td>
-                <td className="px-5 py-2.5 font-medium">{i.title}</td>
-                <td className="px-5 py-2.5 text-slate-600">{i.locationLabel}</td>
-                <td className="px-5 py-2.5">
-                  <span className="font-semibold">{i.votes}</span>{' '}
-                  <span className="text-xs text-emerald-700">+{i.votesThisWeek}</span>
-                </td>
-                <td className="px-5 py-2.5 text-slate-600">{daysBetween(i.createdAt)}d</td>
-                <td className={`px-5 py-2.5 ${i.owner ? '' : 'font-medium text-brand'}`}>{i.owner ?? 'Unassigned'}</td>
-                <td className="px-5 py-2.5">
-                  <StatusTag status={i.status} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </div>
+            <div className="text-sm">{s.action}</div>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }

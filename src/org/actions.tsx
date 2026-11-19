@@ -1,73 +1,79 @@
-import { Send } from 'lucide-react';
-import type { Issue } from '../data/types';
-import { daysBetween } from '../lib/format';
+import { ExternalLink, Send } from 'lucide-react';
+import { linkClass } from '../components/ui';
+import { navigate } from '../router';
 import { useStore } from '../store';
+import type { TodoItem } from './dashboard';
 
-export type Attention = 'nudge' | 'assign' | 'forward';
+export const CHECK_311 = 'https://portal.311.nyc.gov/check-status/';
 
-export const ATTENTION_RULE = 'Rule: flag anything with 50+ votes or 30+ days and no owner, City-owned problems not yet sent, and City requests with no reply in 10+ days';
-
-export function attentionFor(issue: Issue): Attention | null {
-  if (issue.status === 'fixed') return null;
-  if (issue.status === 'sent_to_city' && issue.cityRequest) {
-    const since = issue.cityRequest.lastFollowUp ?? issue.cityRequest.sentOn;
-    return issue.votes >= 50 && daysBetween(since) >= 10 ? 'nudge' : null;
-  }
-  if (issue.agency && !issue.cityRequest && issue.votes >= 25) return 'forward';
-  if (!issue.owner && (issue.votes >= 50 || daysBetween(issue.createdAt) >= 30)) return 'assign';
-  return null;
+/** 311's status page asks for the SR number, so links to it copy the number on the way. */
+export function copySr(sr: string, toast: (message: string) => void) {
+  navigator.clipboard?.writeText(sr).then(
+    () => toast(`Copied ${sr}`),
+    () => {},
+  );
 }
 
-export function attentionReason(issue: Issue) {
-  const days = daysBetween(issue.createdAt);
-  const req = issue.cityRequest;
-  if (req) {
-    const since = req.lastFollowUp ?? req.sentOn;
-    return `City-owned · sent to 311 · no reply in ${daysBetween(since)} days · ${issue.votes} votes`;
-  }
-  if (issue.agency) return `+${issue.votesThisWeek} votes this week · ${issue.agency} handles this, not the District`;
-  return `Open ${days} days · no owner · ${issue.votes} votes`;
-}
+/**
+ * What to do about a to-do item: log a City follow-up right here, review reports on the issue page, or respond,
+ * reply or post an update. With `onCompose` that last one opens a box in place (`open` says it is showing);
+ * without it, it opens the issue. `relative` keeps it above a row whose title link is stretched over the whole row.
+ */
+export function TodoAction({
+  item,
+  block = false,
+  open = false,
+  onCompose,
+}: {
+  item: TodoItem;
+  block?: boolean;
+  open?: boolean;
+  onCompose?: () => void;
+}) {
+  const { nudgeCity, toast } = useStore();
+  const { issue, kind } = item;
+  const button = `relative flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold hover:border-slate-300 ${
+    block ? 'flex-1' : ''
+  }`;
 
-export function ActionButton({ issue, kind, size = 'md' }: { issue: Issue; kind: Attention; size?: 'sm' | 'md' }) {
-  const { nudgeCity, assign, sendToCity, toast } = useStore();
-  const pad = size === 'sm' ? 'px-3 py-1.5 text-xs' : 'px-3.5 py-2 text-sm';
-  if (kind === 'nudge')
+  if (kind === 'city' && issue.cityRequest) {
+    const { sr } = issue.cityRequest;
     return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          nudgeCity(issue.id);
-          toast(`Followed up on ${issue.cityRequest?.sr} with ${issue.votes} votes attached`);
-        }}
-        className={`flex items-center gap-1.5 rounded-lg bg-brand font-semibold text-white hover:bg-brand-dark ${pad}`}
-      >
-        <Send className="h-3.5 w-3.5" /> Nudge City
+      <div className={`relative flex shrink-0 items-center gap-3 ${block ? 'w-full' : ''}`}>
+        <a
+          href={CHECK_311}
+          target="_blank"
+          rel="noreferrer"
+          title="Opens NYC 311’s status page and copies the SR number"
+          onClick={() => copySr(sr, toast)}
+          className={`inline-flex items-center gap-1 whitespace-nowrap text-sm ${linkClass}`}
+        >
+          Check 311 <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+        <button
+          onClick={async () => {
+            if (await nudgeCity(issue.id)) toast(`Follow-up on ${sr} recorded`);
+          }}
+          title="Record that you followed up with the City"
+          className={button}
+        >
+          <Send className="h-3.5 w-3.5" /> Log follow-up
+        </button>
+      </div>
+    );
+  }
+
+  const label = kind === 'quiet' ? 'Post update' : kind === 'residents' ? 'Reply' : kind === 'reported' ? 'Review' : 'Respond';
+  if (onCompose && kind !== 'reported') {
+    return (
+      <button onClick={onCompose} aria-expanded={open} className={button}>
+        {open ? 'Close' : label}
       </button>
     );
-  if (kind === 'forward')
-    return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          sendToCity(issue.id);
-          toast(`Logged a 311 request for ${issue.id}`);
-        }}
-        className={`flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white font-semibold hover:border-slate-300 ${pad}`}
-      >
-        <Send className="h-3.5 w-3.5" /> Forward to City
-      </button>
-    );
+  }
   return (
-    <button
-      onClick={(e) => {
-        e.stopPropagation();
-        assign(issue.id, 'BID crew');
-        toast(`${issue.id} assigned to BID crew`);
-      }}
-      className={`rounded-lg bg-brand font-semibold text-white hover:bg-brand-dark ${pad}`}
-    >
-      Assign
+    <button onClick={() => navigate(`/org/issues/${issue.id}`)} className={button}>
+      {label}
     </button>
   );
 }

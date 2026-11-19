@@ -1,147 +1,172 @@
-import { ArrowLeft, Check, ChevronUp, Landmark, Send, User } from 'lucide-react';
-import { Logo } from '../components/ui';
-import { DEMO_TODAY, daysBetween, shortDate } from '../lib/format';
+import { useEffect, useState } from 'react';
+import { ArrowLeft, Check, Landmark, Send, User } from 'lucide-react';
+import { Logo, StatusTag } from '../components/ui';
+import { config, residentAccounts } from '../config';
+import { STATUSES } from '../data/meta';
+import type { Issue } from '../data/types';
+import { daysBetween, plural, shortDate } from '../lib/format';
 import { navigate } from '../router';
 import { useStore } from '../store';
+import { buildFeed, followedIssues, isNew, lastSeen, markSeen } from './feed';
+import { BUTTON, FixQuestion, HEADING, LINK } from './shared';
 
-interface FeedItem {
-  key: string;
-  issueId: string;
-  date: string;
-  title: string;
-  body: string;
-  kind: 'partner' | 'fixed' | 'city' | 'vote' | 'resident' | 'event';
-}
-
+// Color only where it is a status: a fix, or a hand-off to the City.
 const ICONS = {
-  partner: { Icon: Landmark, cls: 'bg-violet-100 text-violet-700' },
-  fixed: { Icon: Check, cls: 'bg-emerald-100 text-emerald-700' },
-  city: { Icon: Send, cls: 'bg-orange-100 text-brand' },
-  vote: { Icon: ChevronUp, cls: 'bg-slate-100 text-slate-600' },
-  resident: { Icon: User, cls: 'bg-slate-100 text-slate-600' },
-  event: { Icon: Check, cls: 'bg-slate-100 text-slate-600' },
+  district: { Icon: Landmark, color: undefined },
+  fixed: { Icon: Check, color: STATUSES.fixed.color },
+  city: { Icon: Send, color: STATUSES.sent_to_city.color },
+  resident: { Icon: User, color: undefined },
+  event: { Icon: Check, color: undefined },
 };
 
+const SECTION = 'mt-7 border-t border-slate-100 pt-6';
+
+/**
+ * You (`#/updates`): the resident's own page, behind the person button on the map. What needs their
+ * answer, what changed on their problems, the problems themselves, and the optional account.
+ */
 export default function Updates() {
   const store = useStore();
-  const followedIds = new Set([...store.voted, ...store.following]);
-  const followed = store.issues.filter((i) => followedIds.has(i.id));
+  const followed = followedIssues(store.issues, store.voted, store.following);
   const toConfirm = followed.filter((i) => i.status === 'fixed' && !store.confirmed[i.id]);
-
-  const feed: FeedItem[] = followed.flatMap((issue) => [
-    ...issue.updates
-      .filter((u) => u.author !== 'You')
-      .map<FeedItem>((u) => ({
-        key: u.id,
-        issueId: issue.id,
-        date: u.date,
-        title: u.role === 'partner' ? `${u.author} posted an update` : `${u.author} added a note`,
-        body: u.text,
-        kind: u.role === 'partner' ? 'partner' : 'resident',
-      })),
-    ...issue.history
-      .filter((h) => !h.text.startsWith('Pinned'))
-      .map<FeedItem>((h, idx) => ({
-        key: `${issue.id}-h${idx}`,
-        issueId: issue.id,
-        date: h.date,
-        title: h.text.startsWith('Marked fixed') ? h.text : h.text.split(' · ')[0],
-        body: issue.title,
-        kind: h.text.startsWith('Marked fixed') ? 'fixed' : /City|311/.test(h.text) ? 'city' : 'event',
-      })),
-    ...(store.voted.includes(issue.id) && !issue.isUserReport
-      ? [{ key: `${issue.id}-vote`, issueId: issue.id, date: DEMO_TODAY, title: 'You +1’d a problem', body: issue.title, kind: 'vote' as const }]
-      : []),
-  ]);
-  feed.sort((a, b) => b.date.localeCompare(a.date));
-
-  const today = feed.filter((f) => f.date === DEMO_TODAY);
-  const earlier = feed.filter((f) => f.date !== DEMO_TODAY && daysBetween(f.date) <= 30);
-
-  const Group = ({ label, items }: { label: string; items: FeedItem[] }) =>
-    items.length ? (
-      <section className="mt-5">
-        <h2 className="mb-1 font-mono text-[11px] tracking-wider text-slate-500">{label}</h2>
-        {items.map((f) => {
-          const { Icon, cls } = ICONS[f.kind];
-          return (
-            <button
-              key={f.key}
-              onClick={() => navigate(`/i/${f.issueId}`)}
-              className="flex w-full gap-3 border-b border-slate-100 py-3 text-left"
-            >
-              <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${cls}`}>
-                <Icon className="h-4 w-4" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block font-semibold">{f.title}</span>
-                <span className="line-clamp-2 block text-sm text-slate-600">{f.body}</span>
-              </span>
-              <span className="font-mono text-[11px] text-slate-400">{shortDate(f.date)}</span>
-            </button>
-          );
-        })}
-      </section>
-    ) : null;
+  const all = buildFeed(followed, store.district.name);
+  // What was new when the page opened stays marked while it is open; what arrives meanwhile is new too.
+  const [seenBefore] = useState(() => lastSeen(all));
+  const keys = all.map((f) => f.key).join();
+  useEffect(() => markSeen(all), [keys]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Each problem with its latest changes (the last 30 days, two at most) and how many are new.
+  const groups = followed
+    .map((issue) => {
+      const mine = all.filter((f) => f.issueId === issue.id);
+      return {
+        issue,
+        items: mine.filter((f) => daysBetween(f.date) <= 30).slice(0, 2),
+        fresh: mine.filter((f) => isNew(f, seenBefore)).length,
+        last: mine[0]?.date ?? '',
+      };
+    })
+    .sort((a, b) => Number(b.fresh > 0) - Number(a.fresh > 0) || b.last.localeCompare(a.last) || a.issue.title.localeCompare(b.issue.title));
+  // Why a problem is here: the strongest tie first.
+  const relation = (issue: Issue) =>
+    issue.isUserReport
+      ? 'you pinned it'
+      : store.voted.includes(issue.id)
+        ? 'you +1’d it'
+        : store.following.includes(issue.id)
+          ? 'you follow it'
+          : 'you left a note on it';
+  const noteOnly = followed.some((i) => relation(i) === 'you left a note on it');
+  const where = store.account ? 'saved to your account' : config.notifications ? 'sent to your phone' : 'on this phone';
 
   return (
-    <div className="px-5 pb-8 pt-6">
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <button onClick={() => navigate('/')} aria-label="Back to map">
-            <ArrowLeft className="h-5 w-5" />
-          </button>
-          <Logo />
-        </div>
-        <span className="font-mono text-xs text-slate-400">{shortDate(DEMO_TODAY)}</span>
+    <div className="px-5 pb-10 pt-6">
+      <div className="mb-6 flex items-center gap-3">
+        <button onClick={() => navigate('/')} aria-label="Back to map">
+          <ArrowLeft className="h-5 w-5" />
+        </button>
+        <Logo />
       </div>
 
-      <h1 className="text-3xl font-bold">Your updates</h1>
-      <p className="mt-1 text-slate-500">
-        Sent to your phone · following {followed.length} problem{followed.length === 1 ? '' : 's'}
-      </p>
+      <h1 className="text-2xl font-bold">You</h1>
+      {followed.length > 0 && (
+        <p className="mt-1 text-[15px] text-slate-600">
+          {plural(followed.length, 'problem')} you pinned, +1’d{noteOnly ? ', follow or left a note on' : ' or follow'} · {where}
+        </p>
+      )}
 
-      {toConfirm.map((issue) => (
-        <div key={issue.id} className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-          <p className="flex items-center gap-2 text-lg font-semibold">
-            <Check className="h-5 w-5 text-emerald-700" /> Is “{issue.title}” fixed?
-          </p>
-          <p className="mt-1 text-sm text-slate-700">
-            {issue.owner ?? 'The District'} marked this fixed. You +1’d it; help confirm whether it’s really done.
-          </p>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button
-              onClick={() => {
-                store.confirmFix(issue.id, 'yes');
-                store.toast('Thanks for confirming!');
-              }}
-              className="rounded-lg bg-emerald-700 py-2.5 font-semibold text-white"
-            >
-              Yes, it’s fixed
-            </button>
-            <button
-              onClick={() => {
-                store.confirmFix(issue.id, 'no');
-                store.toast('Got it. We’ll let the District know.');
-              }}
-              className="rounded-lg border border-slate-200 bg-white py-2.5 font-semibold"
-            >
-              Still broken
-            </button>
-          </div>
-        </div>
-      ))}
+      {toConfirm.length > 0 && (
+        <section className={SECTION}>
+          <h2 className={HEADING}>Is it really fixed?</h2>
+          {toConfirm.map((issue) => (
+            <div key={issue.id} className="mt-3 rounded-xl border border-slate-200 p-4">
+              <FixQuestion issue={issue} named>
+                <p className="mt-1 text-sm text-slate-600">
+                  {store.district.name} marked this fixed{issue.fixedOn ? ` on ${shortDate(issue.fixedOn)}` : ''}. You{' '}
+                  {relation(issue).replace(/^you /, '')}; help confirm whether it’s really done.
+                </p>
+              </FixQuestion>
+            </div>
+          ))}
+        </section>
+      )}
 
-      <Group label="TODAY" items={today} />
-      <Group label="EARLIER" items={earlier} />
+      {/* One block per problem: its name and status, then its latest one or two changes. Problems
+          with something new come first, then the ones that changed most recently. */}
+      {groups.length > 0 && (
+        <section className={SECTION}>
+          <h2 className={HEADING}>Your problems</h2>
+          <ul className="mt-1">
+            {groups.map(({ issue, items, fresh }) => (
+              <li key={issue.id}>
+                <button onClick={() => navigate(`/i/${issue.id}`)} className="block w-full border-b border-slate-100 py-4 text-left">
+                  <span className="flex items-baseline justify-between gap-3">
+                    <span className="text-balance font-semibold leading-snug">{issue.title}</span>
+                    {fresh > 0 && <span className="shrink-0 text-xs font-semibold text-ink">{fresh === 1 ? 'New' : `${fresh} new`}</span>}
+                  </span>
+                  <span className="mt-0.5 block text-sm text-slate-600">
+                    <StatusTag status={issue.status} resident /> ·{' '}
+                    {relation(issue)}
+                  </span>
+                  {items.length > 0 && (
+                    <span className="mt-2 block space-y-1.5">
+                      {items.map((f) => {
+                        const { Icon, color } = ICONS[f.kind];
+                        const isFresh = isNew(f, seenBefore);
+                        return (
+                          <span key={f.key} className="flex gap-2.5 text-sm">
+                            <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" style={{ color }} />
+                            <span className={`line-clamp-2 min-w-0 flex-1 ${isFresh ? 'text-ink' : 'text-slate-600'}`}>{f.summary}</span>
+                            <span className={`shrink-0 text-xs ${isFresh ? 'font-semibold text-ink' : 'text-slate-500'}`}>
+                              {isFresh ? 'New' : shortDate(f.date)}
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {!followed.length && (
-        <div className="mt-10 rounded-xl border border-dashed border-slate-300 p-6 text-center text-slate-500">
-          +1 or pin a problem and its updates will show up here.
-          <button onClick={() => navigate('/')} className="mt-3 block w-full font-semibold text-brand">
+        <div className="mt-6">
+          <p className="text-lg font-semibold">Nothing here yet</p>
+          <p className="mt-1 text-[15px] leading-relaxed text-slate-600">Problems you pin, +1 or follow show up here, with their updates.</p>
+          <button onClick={() => navigate('/')} className={`${BUTTON} mt-4 px-4 py-2.5`}>
             Open the map
           </button>
         </div>
+      )}
+
+      {/* The account last: the page works without one. */}
+      {residentAccounts && (
+        <p className="mt-10 border-t border-slate-100 pt-5 text-sm leading-relaxed text-slate-600">
+          {store.account ? (
+            <>
+              Signed in as {store.account.email} ·{' '}
+              <a href="#/account" className={LINK}>
+                Account
+              </a>
+            </>
+          ) : followed.length ? (
+            <>
+              <a href="#/account?next=/updates&from=updates" className={LINK}>
+                Keep them with your email
+              </a>
+              , so a new phone or a cleared browser still has them.
+            </>
+          ) : (
+            <>
+              Saved problems with your email before?{' '}
+              <a href="#/account?next=/updates&from=updates" className={LINK}>
+                Sign in
+              </a>
+            </>
+          )}
+        </p>
       )}
     </div>
   );

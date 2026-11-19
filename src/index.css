@@ -8,6 +8,8 @@
   --color-brand-soft: #fff1ea;
   --color-ink: #141b2d;
   --color-sidebar: #141b2d;
+  /* A very wide window: the issue page gets a third column instead of a blank half. */
+  --breakpoint-3xl: 120rem;
 }
 
 html,
@@ -20,13 +22,52 @@ body {
   @apply bg-slate-100 text-ink antialiased;
 }
 
+/* One focus ring for everything the keyboard reaches. It sits in the base layer, so a field that
+   draws its ring on a wrapper can opt out with `outline-none`. On a dark surface, set
+   `[--focus-ring:white]` on the container. */
+@layer base {
+  :where(a, button, input, select, textarea, [role='button'], [tabindex='0']):focus-visible {
+    outline: 2px solid var(--focus-ring, var(--color-ink));
+    outline-offset: 2px;
+  }
+  /* A map fills a clipped box, so its ring goes inside the edge. */
+  .leaflet-container:focus-visible {
+    outline-offset: -2px;
+  }
+  /* No word left alone on the last line: titles break into even lines, text avoids a lone last word. */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p,
+  li {
+    text-wrap: pretty;
+  }
+}
+
 .leaflet-container {
   font-family: inherit;
   background: #eef0f3;
 }
 
-.leaflet-tile-pane {
+.leaflet-tile-pane,
+.static-map-tiles {
   filter: grayscale(1) contrast(0.85) brightness(1.08);
+}
+
+/* The staff map of the whole district. The base map is paler than elsewhere: at this scale the
+   buildings are noise and the dots are the content. It also opens zoomed between whole levels (to
+   frame the district), which scales the tiles and leaves hairline seams; drawing each tile a pixel
+   over its slot covers them. Leaflet's own fix for seams adds neighboring edges together, which
+   would turn that overlap into a bright line, so it is switched off here. */
+.district-map .leaflet-tile-pane {
+  filter: grayscale(1) contrast(0.6) brightness(1.22);
+}
+.district-map .leaflet-container img.leaflet-tile {
+  mix-blend-mode: normal;
+  width: 257px !important;
+  height: 257px !important;
 }
 
 .vote-label.leaflet-tooltip {
@@ -35,7 +76,7 @@ body {
   border-radius: 6px;
   box-shadow: none;
   padding: 0 5px;
-  font: 600 11px/18px "Inter", sans-serif;
+  font: 600 12px/18px "Inter", sans-serif;
   color: #141b2d;
 }
 .vote-label.leaflet-tooltip::before {
